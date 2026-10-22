@@ -91,6 +91,14 @@ jobs:
           key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock', '**/pubspec.yaml') }}
           restore-keys: pub-${{ runner.os }}-
 
+      # Build hooks verify this source cache before compiling. The guard tests
+      # can build native assets even though the full suite runs only locally.
+      - name: Cache Mbed TLS sources
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ham2k/halo_tls_psk/mbedtls
+          key: mbedtls-source-${{ runner.os }}-${{ hashFiles('packages/halo_tls_psk/UPSTREAM.json', 'packages/halo_tls_psk/patches/*.patch') }}
+
       # The script generates lib/config/secrets.dart itself (blank template on
       # a checkout without app_dist), so nothing to do here.
       - name: Guards, typecheck and analyze

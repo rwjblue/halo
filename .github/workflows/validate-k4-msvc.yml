@@ -1,0 +1,113 @@
+# Copyright ©️ 2026 Robert Jackson <me@rwjblue.com>
+# SPDX-License-Identifier: MPL-2.0
+# Native build/load evidence; the test suite runs through the local gate.
+name: Validate K4 native MSVC build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/halo_tls_psk/**'
+      - 'mise.toml'
+      - '.github/workflows/validate-k4-msvc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: packages/halo_tls_psk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pinned Flutter toolchain
+        uses: jdx/mise-action@v2
+
+      - name: Resolve package dependencies
+        run: |
+          flutter --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter version check failed.' }
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Package resolution failed.' }
+
+      - name: Build the native asset and load it in Dart
+        run: |
+          New-Item -ItemType Directory -Path build/msvc-evidence -Force | Out-Null
+          dart run tool/validate_windows.dart | Tee-Object build/msvc-evidence/load.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Native build/load validation failed.' }
+
+      - name: Verify MSVC provenance and the DLL
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installations = & $vswhere -all -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Visual Studio discovery failed.' }
+          $compilers = @($installations | ForEach-Object {
+            Get-ChildItem "$($_.installationPath)/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"
+          })
+          $outputs = @(Get-ChildItem .dart_tool/hooks_runner/halo_tls_psk -Filter output.json -Recurse)
+          if ($outputs.Count -ne 1) { throw 'Expected one fresh package build-hook result.' }
+          $output = Get-Content $outputs[0].FullName -Raw | ConvertFrom-Json
+          $inputPath = Join-Path $outputs[0].DirectoryName input.json
+          $hookInput = Get-Content $inputPath -Raw | ConvertFrom-Json
+          $target = $hookInput.config.extensions.code_assets
+          if ($target.target_os -ne 'windows' -or $target.target_architecture -ne 'x64') {
+            throw 'The hook did not target Windows x64.'
+          }
+          $assets = @($output.assets | Where-Object {
+            $_.encoding.id -eq 'package:halo_tls_psk/src/native_tls.dart'
+          })
+          if ($assets.Count -ne 1) { throw 'The expected native asset is missing.' }
+          $dll = $assets[0].encoding.file
+          $commands = Get-Content (Join-Path $outputs[0].DirectoryName stdout.txt)
+          $compiler = @($compilers | Where-Object {
+            $path = $_.FullName
+            @($commands | Where-Object {
+              $_.IndexOf($path, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.Contains('halo_tls.c') -and $_.Contains('/std:c11') -and $_.Contains('/LD')
+            }).Count -gt 0
+          })
+          if ($compiler.Count -ne 1) { throw 'The hook log does not prove compilation with MSVC cl.exe.' }
+          $dumpbin = Join-Path $compiler[0].DirectoryName dumpbin.exe
+          foreach ($kind in @('headers', 'exports', 'imports')) {
+            & $dumpbin /nologo "/$kind" $dll | Set-Content "build/msvc-evidence/$kind.txt"
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin /$kind failed." }
+          }
+          $headers = Get-Content build/msvc-evidence/headers.txt -Raw
+          if ($headers -notmatch '8664 machine \(x64\)') { throw 'Expected an x64 PE DLL.' }
+          $exports = Get-Content build/msvc-evidence/exports.txt -Raw
+          $symbols = @('new', 'free', 'feed', 'drain', 'read', 'write', 'handshake', 'close_notify')
+          foreach ($symbol in $symbols) {
+            if ($exports -notmatch "(?m)\s+halo_tls_$symbol\s*$") { throw "Missing halo_tls_$symbol export." }
+          }
+          if ($exports -match 'mbedtls_') { throw 'Unexpected upstream TLS exports.' }
+          $imports = Get-Content build/msvc-evidence/imports.txt -Raw
+          if ($imports -notmatch 'bcrypt\.dll' -or $imports -notmatch 'BCryptGenRandom') {
+            throw 'The Windows OS entropy dependency is missing.'
+          }
+          Copy-Item $dll build/msvc-evidence/halo_tls_psk.dll
+          @{
+            commit = $env:GITHUB_SHA
+            runner = $env:RUNNER_OS
+            compiler = $compiler[0].FullName
+            compilerVersion = $compiler[0].VersionInfo.FileVersion
+            target = 'windows-x64'
+            asset = $assets[0].encoding.id
+            sha256 = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+            scope = 'Actual Dart hook, MSVC DLL build, native asset loading and in-memory ClientHello; no radio or full Flutter app validation.'
+          } | ConvertTo-Json | Set-Content build/msvc-evidence/summary.json
+
+      # Hook command logs may include compiler environment variables. Retain
+      # only the DLL and selected diagnostics, never the raw hook logs/cache.
+      - name: Retain native build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k4-msvc-${{ github.sha }}
+          path: packages/halo_tls_psk/build/msvc-evidence/
+          if-no-files-found: warn
+          retention-days: 7

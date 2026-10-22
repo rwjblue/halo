@@ -1,0 +1,27 @@
+name: halo_tls_psk
+description: "Bounded TLS 1.2 PSK connections using a source-built native Mbed TLS client."
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  archive: ^4.0.9
+  code_assets: ^1.2.1
+  crypto: ^3.0.7
+  ffi: ^2.1.0
+  hooks: ^2.0.2
+  # Re-audit the meta override before changing this toolchain version.
+  native_toolchain_c: 0.19.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+dependency_overrides:
+  # Keep Flutter's pin while using native_toolchain_c 0.19.3's MSVC fix.
+  # Its only meta API is @visibleForTesting, also present in 1.18.0.
+  # Remove with the app override when pinned Flutter accepts meta >=1.19.0.
+  meta: 1.18.0
