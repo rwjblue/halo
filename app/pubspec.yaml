@@ -13,6 +13,8 @@ dependencies:
     sdk: flutter
   halo_extension_host:
     path: ../packages/halo_extension_host
+  halo_tls_psk:
+    path: ../packages/halo_tls_psk
   halo_core:
     path: ../packages/halo_core
   halo_i18n:
@@ -180,6 +182,11 @@ dev_dependencies:
 # the kernel snapshot on an interface member the vendored copy still uses.
 # Re-vendor and move these together or not at all.
 dependency_overrides:
+  # native_toolchain_c 0.19.3 fixes MSVC executable/argument quoting but asks
+  # for meta ^1.19.0. Its only meta API is @visibleForTesting; retain Flutter's
+  # existing pin. Remove this and the halo_tls_psk override when pinned Flutter
+  # accepts meta >=1.19.0. See packages/halo_tls_psk/README.md.
+  meta: 1.18.0
   flutter_inappwebview_platform_interface: 1.4.0-beta.3
   # The interface pulls this one with a CARET (`^1.3.0`), so it is the family
   # member a `pub upgrade` is still free to move while every other pin holds.
