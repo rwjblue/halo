@@ -57,7 +57,8 @@ exists (optional — every consumer degrades without its key, and the Map tab
 needs none: MapLibre and OpenFreeMap take no token); runs `npm ci` and
 `npm run build` in `extensions/` (the bundles are gitignored, and the app is
 nothing without them); builds the host copy of the JS engine that
-`flutter test` and `halo-ext` load; and runs `flutter pub get` for the app
+`flutter test` and `halo-ext` load; prepares the pinned recorder packages and
+their local I/Q patches; and runs `flutter pub get` for the app
 and every first-party package. Re-run it after pulling — each step is a
 no-op once done.
 
@@ -71,6 +72,41 @@ Notes:
   `DEVELOPMENT_TEAM` to your Apple team ID (same for
   `app/ios/Flutter/Local.xcconfig.sample`). See
   [README.md](README.md#building-locally-on-macos-or-ios).
+
+### Patched recorder dependencies
+
+`mise run prepare-record` downloads the pinned recorder archives, verifies
+their SHA-256 hashes, and applies the tracked patches and overlays in
+[`dependencies/record/`](dependencies/record/). The resulting
+`packages/record_*_patched/` directories are generated and ignored by git.
+Edit the tracked patches or overlays when changing a backend.
+
+Setup, the Flutter run tasks, deployment scripts, and app/native test runs
+prepare these packages automatically. Every target needs all five package
+directories before `flutter pub get`, including web, because the app resolves
+all of its path overrides. The shared Pub cache is never patched.
+
+Before using an IDE or a direct `flutter pub get`, `flutter run`, or
+`flutter build` command on a fresh checkout, run `mise run prepare-record`.
+Run it again after pulling changes to the recorder dependencies. Flutter's
+native build hooks run after package resolution and cannot prepare a missing
+path dependency themselves.
+
+The same preparation works in Windows PowerShell without Bash, from the
+repository root with Flutter's Dart SDK and Git on `PATH`:
+
+```powershell
+Push-Location packages/halo_build_tools
+dart run bin/prepare_record.dart
+Pop-Location
+```
+
+Complete preparation successfully before running Flutter. For an offline
+build, prepare the build-tools package's Dart dependencies and recorder
+archives while online first, then use `mise run prepare-record -- --offline`.
+Distribution build entrypoints must run the same helper before their first
+app dependency resolution; changes under `dependencies/record/` require a
+full native rebuild.
 
 ---
 

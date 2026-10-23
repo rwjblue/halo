@@ -15,6 +15,9 @@ build/
 # pub.dev published (see their PATCH.md).
 .swiftpm/
 
+# Downloaded and patched before Flutter resolves the app's path dependencies.
+/packages/record_*_patched/
+
 # Generated plugin bundles (built from plugins/ by `npm run build`)
 app/assets/extensions/
 

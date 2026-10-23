@@ -73,7 +73,15 @@ start ms-settings:developers # Enable Developer Mode
 cd app/lib/config
 copy secrets.dart.example secrets.dart
 cd ../../..
+
+Push-Location packages/halo_build_tools
+dart run bin/prepare_record.dart
+Pop-Location
 ```
+
+The recorder preparation must succeed before the first Flutter command. Run it
+again after pulling recorder changes; see the
+[dependency setup notes](DEVELOPMENT.md#patched-recorder-dependencies).
 
 Build:
 ```
