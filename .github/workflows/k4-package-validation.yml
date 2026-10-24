@@ -1,0 +1,133 @@
+name: K4 package Windows validation
+on:
+  push:
+    branches: [rwjblue/k4-msvc-validation-20261024]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Build and load from spaced Unicode checkout and cache
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = mise where flutter
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve pinned Flutter SDK.' }
+          $flutter = Join-Path $sdk 'bin/flutter.bat'
+          $dart = Join-Path $sdk 'bin/dart.bat'
+          if (!(Test-Path $flutter) -or !(Test-Path $dart)) { throw 'Missing Windows SDK launchers.' }
+          Write-Host "Pinned SDK: $sdk"
+          $package = Join-Path $env:RUNNER_TEMP 'K4 checkout René/packages/halo_tls_psk'
+          New-Item -ItemType Directory -Path (Split-Path $package) -Force | Out-Null
+          Copy-Item packages/halo_tls_psk $package -Recurse
+          $cache = (Join-Path $env:RUNNER_TEMP 'K4 cache René').Replace('\', '/')
+          Add-Content -Encoding utf8 (Join-Path $package pubspec.yaml) "`nhooks:`n  user_defines:`n    halo_tls_psk:`n      cache_dir: '$cache'"
+          Set-Location $package
+          & $flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Package resolution failed.' }
+          $lock = Get-Content pubspec.lock -Raw
+          if ($lock -notmatch '(?ms)^  native_toolchain_c:\r?\n(?:(?!^  [a-z_]+:).)*?^    version: "0.19.2"\r?$') { throw 'Expected native_toolchain_c 0.19.2.' }
+          if ($lock -match 'direct overridden') { throw 'Unexpected dependency override.' }
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'msvc-evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          & $dart run tool/validate_windows.dart | Tee-Object (Join-Path $evidence 'load.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'Native DLL build/load failed.' }
+          $outputFiles = @(Get-ChildItem .dart_tool/hooks_runner/halo_tls_psk -Filter output.json -Recurse)
+          if ($outputFiles.Count -ne 1) { throw 'Expected one native build result.' }
+          $output = Get-Content $outputFiles[0].FullName -Raw | ConvertFrom-Json
+          $inputPath = Join-Path $outputFiles[0].DirectoryName input.json
+          $hookInput = Get-Content $inputPath -Raw | ConvertFrom-Json
+          $assets = @($output.assets | Where-Object { $_.encoding.id -eq 'package:halo_tls_psk/src/native_tls.dart' })
+          if ($assets.Count -ne 1 -or $assets[0].encoding.link_mode.type -ne 'dynamic_loading_bundle') { throw 'Expected one dynamic native asset.' }
+          $dll = $assets[0].encoding.file
+          if ([IO.Path]::GetExtension($dll) -ne '.dll') { throw 'Expected DLL asset.' }
+          $commands = Get-Content (Join-Path $outputFiles[0].DirectoryName 'stdout.txt')
+          $compilerLines = @($commands | Where-Object { $_ -match '^Running MSVC directly: (.*cl\.exe) @' })
+          if ($compilerLines.Count -ne 1) { throw 'Expected one direct MSVC compiler invocation.' }
+          $null = $compilerLines[0] -match '^Running MSVC directly: (.*cl\.exe) @'
+          $compiler = Get-Item $Matches[1]
+          $installation = $compiler.FullName -replace '\\VC\\Tools\\.*$', ''
+          $dumpbin = Join-Path $compiler.DirectoryName dumpbin.exe
+          foreach ($kind in @('headers','exports','imports')) {
+            & $dumpbin /nologo "/$kind" $dll | Set-Content (Join-Path $evidence "$kind.txt")
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin /$kind failed." }
+          }
+          $headers = Get-Content (Join-Path $evidence 'headers.txt') -Raw
+          if ($headers -notmatch '8664 machine \(x64\)') { throw 'Expected x64 DLL.' }
+          $exports = Get-Content (Join-Path $evidence 'exports.txt') -Raw
+          foreach ($symbol in @('new','free','feed','drain','read','write','handshake','close_notify')) {
+            if ($exports -notmatch "(?m)\s+halo_tls_$symbol\s*$") { throw "Missing export: $symbol" }
+          }
+          if ($exports -match 'mbedtls_') { throw 'Unexpected TLS exports.' }
+          $imports = Get-Content (Join-Path $evidence 'imports.txt') -Raw
+          if ($imports -notmatch 'bcrypt\.dll' -or $imports -notmatch 'BCryptGenRandom') { throw 'OS entropy linkage missing.' }
+          @'
+          import 'dart:convert';
+          import 'dart:io';
+          import 'package:hooks/hooks.dart';
+          void main(List<String> args) {
+            stdout.write(BuildInput(jsonDecode(File(args.single).readAsStringSync()) as Map<String, dynamic>).outputDirectory.toFilePath());
+          }
+          '@ | Set-Content -Encoding utf8 tool/validation_output_dir.dart
+          foreach ($mode in @('static','prefer_static')) {
+            $buildDir = Join-Path $package "static output René $mode"
+            New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+            $hookInput.config.extensions.code_assets.link_mode_preference = $mode
+            $hookInput.out_dir_shared = ($buildDir.Replace('\','/') + '/compiled/')
+            $tools = @{
+              cc = $compiler.FullName
+              ar = (Join-Path $compiler.DirectoryName lib.exe)
+              ld = (Join-Path $compiler.DirectoryName link.exe)
+              windows = @{ developer_command_prompt = @{
+                script = (Join-Path $installation 'VC/Auxiliary/Build/vcvars64.bat')
+                arguments = @()
+              } }
+            }
+            $hookInput.config.extensions.code_assets | Add-Member -Force -NotePropertyName c_compiler -NotePropertyValue $tools
+            $hookInput.out_file = (Join-Path $buildDir 'output.json').Replace('\','/')
+            $staticInput = Join-Path $buildDir input.json
+            $hookInput | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $staticInput
+            $actualBuildDir = & $dart tool/validation_output_dir.dart $staticInput
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot determine native output path.' }
+            New-Item -ItemType Directory -Path (Join-Path $actualBuildDir 'objects') -Force | Out-Null
+            Set-Content (Join-Path $actualBuildDir 'stray.obj') 'This must never become an archive member.'
+            Set-Content (Join-Path $actualBuildDir 'objects/stray.obj') 'This must never become an archive member.'
+            & $dart hook/build.dart --config $staticInput
+            if ($LASTEXITCODE -ne 0) { throw "Static build failed: $mode" }
+            $staticOutput = Get-Content $hookInput.out_file -Raw | ConvertFrom-Json
+            $staticAssets = @($staticOutput.assets | Where-Object { $_.encoding.id -eq 'package:halo_tls_psk/src/native_tls.dart' })
+            if ($staticAssets.Count -ne 1 -or $staticAssets[0].encoding.link_mode.type -ne 'static') { throw 'Expected one static native asset.' }
+            $lib = $staticAssets[0].encoding.file
+            if ([IO.Path]::GetExtension($lib) -ne '.lib') { throw 'Expected static library asset.' }
+            $librarian = Join-Path $compiler.DirectoryName lib.exe
+            & $librarian /nologo /list $lib | Set-Content (Join-Path $evidence "$mode-members.txt")
+            if ($LASTEXITCODE -ne 0) { throw "Archive inspection failed: $mode" }
+            $members = Get-Content (Join-Path $evidence "$mode-members.txt") -Raw
+            if ($members -match 'stray.obj' -or $members -notmatch 'halo_tls.obj') { throw 'Wrong static archive members.' }
+          }
+          Copy-Item $dll (Join-Path $evidence 'halo_tls_psk.dll')
+          @{
+            commit = $env:GITHUB_SHA
+            compiler = $compiler.FullName
+            compilerVersion = $compiler.VersionInfo.FileVersion
+            target = 'windows-x64'
+            nativeToolchainC = '0.19.2'
+            checkout = $package
+            sourceCache = $cache
+            staticModes = @('static','prefer_static')
+            sha256 = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+            scope = 'Actual native hook with spaced Unicode checkout/output/cache, DLL load and ClientHello, explicit static archives; no radio or full Flutter app packaging.'
+          } | ConvertTo-Json | Set-Content (Join-Path $evidence 'summary.json')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k4-msvc-validation
+          path: msvc-evidence/
+          if-no-files-found: warn
+          retention-days: 14
